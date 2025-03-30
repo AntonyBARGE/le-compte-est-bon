@@ -22,8 +22,6 @@ class DrawTile extends StatelessWidget {
   });
 
   bool get _isOperator => (variant == TileVariant.operator || variant == TileVariant.operatorButton);
-  bool get _isNumber => (variant == TileVariant.number || variant == TileVariant.numberButton);
-  bool get _isButton => (variant == TileVariant.numberButton || variant == TileVariant.operatorButton);
 
   @override
   Widget build(BuildContext context) {

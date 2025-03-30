@@ -3,11 +3,14 @@ import 'dart:math';
 import 'package:carousel_slider/carousel_slider.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:le_compte_est_bon/best_result_board.dart';
 import 'package:le_compte_est_bon/calculation_line.dart';
 import 'package:le_compte_est_bon/draw_tile.dart';
 import 'package:le_compte_est_bon/number_tile.dart';
 import 'package:le_compte_est_bon/result_board.dart';
 import 'package:smooth_page_indicator/smooth_page_indicator.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -23,10 +26,10 @@ class HomePageState extends State<HomePage> {
   List<NumberTile> _solutions = [];
   List<CalculationLine> _lines = [];
   int _numberOfBestSolutions = 0;
-  NumberTile? _shortestSolution;
   NumberTile? _longestSolution;
   List<NumberTile> bestSolutions = [];
   int activeCarouselIndex = 0;
+  final List<NumberTile> _cachedSolutions = [];
 
   @override
   void initState() {
@@ -37,6 +40,9 @@ class HomePageState extends State<HomePage> {
   void _generateDraw() {
     _numberOfBestSolutions = 0;
     _clearCalculRows();
+    setState(() {
+      _cachedSolutions.clear();
+    });
     final List<int> bigTiles = [25, 50, 75, 100];
     final List<int> smallTiles = List.generate(10, (i) => i + 1);
     List<int> tiles = [...smallTiles, ...smallTiles, ...bigTiles];
@@ -47,9 +53,10 @@ class HomePageState extends State<HomePage> {
       _solutions = [];
       _draw.addAll(tiles.take(6).map((n) => NumberTile(n, Expression.leaf(n), false)));
       _targetNumber = 100 + _random.nextInt(900);
-      _shortestSolution = null;
       _longestSolution = null;
     });
+
+    _calculateSolution(isHidden: true);
   }
 
   void _clearCalculRows() {
@@ -61,35 +68,49 @@ class HomePageState extends State<HomePage> {
     });
   }
 
-  Future<void> _calculateSolution() async {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => Center(
-        child: CircularProgressIndicator(color: Colors.deepPurple),
-      ),
-    );
+  Future<void> _calculateSolution({bool isHidden = false}) async {
+    void processSolutions(List<NumberTile> solutions) {
+      // Deduplicate best solutions based on the expression equality.
+      Set<Expression> uniqueExpressions = {};
+      int bestValue = solutions.first.value;
+      bestSolutions.clear();
+      bestSolutions.addAll(solutions.where((s) => s.value == bestValue && uniqueExpressions.add(s.expr)).toList());
 
-    _solutions = await _exploreAndSortSolutions();
+      // Sort best solutions by the length of their expression.
+      bestSolutions.sort((a, b) => a.expr.toString().length.compareTo(b.expr.toString().length));
 
-    // Deduplicate best solutions based on the expression equality.
-    Set<Expression> uniqueExpressions = {};
-    int bestValue = _solutions.first.value;
-    bestSolutions.clear();
-    bestSolutions.addAll(_solutions.where((s) => s.value == bestValue && uniqueExpressions.add(s.expr)).toList());
+      setState(() {
+        _numberOfBestSolutions = uniqueExpressions.length;
+        _longestSolution = bestSolutions.last;
+        // Set carousel starting index to the longest best solution.
+        activeCarouselIndex = bestSolutions.length - 1;
+        _clearCalculRows();
+        _getInputsFromResult(_longestSolution?.expr);
+      });
+    }
 
-    bestSolutions.sort((a, b) => a.expr.toString().length.compareTo(b.expr.toString().length));
+    if (!isHidden) {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => Center(
+          child: CircularProgressIndicator(color: Colors.deepPurple),
+        ),
+      );
+    }
 
-    setState(() {
-      _numberOfBestSolutions = uniqueExpressions.length;
-      _shortestSolution = bestSolutions.first;
-      _longestSolution = bestSolutions.last;
-      _clearCalculRows();
-      _getInputsFromResult(_longestSolution?.expr);
-    });
+    if (_cachedSolutions.isEmpty) {
+      _solutions = await _exploreAndSortSolutions();
+      setState(() {
+        _cachedSolutions.addAll(_solutions);
+      });
+    }
 
-    // ignore: use_build_context_synchronously
-    Navigator.of(context).pop();
+    if (!isHidden) {
+      processSolutions(_cachedSolutions);
+      // ignore: use_build_context_synchronously
+      Navigator.of(context).pop();
+    }
   }
 
   Future<List<NumberTile>> _exploreAndSortSolutions() async {
@@ -112,13 +133,18 @@ class HomePageState extends State<HomePage> {
   }
 
   void onOperatorPressed(Operator op) {
-    NumberTile? lastResult = _getResultTiles().last;
+    int lastResultIndex = _getResultTiles().lastIndexWhere((result) => result != null);
+    int? lastResult;
+    if (lastResultIndex != -1) {
+      lastResult = _lines[lastResultIndex].result;
+    }
     setState(() {
       for (var line in _lines) {
         if (!line.isComplete) {
           // If the line is empty and a last result is available, use it.
           if (line.isEmpty && lastResult != null) {
-            line.addInput(lastResult.value);
+            line.addInput(lastResult);
+            _lines[lastResultIndex].isResultUsed = true;
           }
           line.setOperator(op);
           break;
@@ -129,22 +155,31 @@ class HomePageState extends State<HomePage> {
 
   void onCancelPressed() {
     setState(() {
-      for (int i = _lines.length - 1; i >= 0; i--) {
-        if (!_lines[i].isEmpty) {
-          int? removedValue = _lines[i].removeLastInput();
-          if (removedValue != null) {
-            int index = _draw.indexWhere((tile) => tile.value == removedValue && tile.isAlreadyPicked);
-            if (index != -1) {
-              _draw[index].isAlreadyPicked = false;
+      if (bestSolutions.isNotEmpty) {
+        _numberOfBestSolutions = 0;
+        bestSolutions.clear();
+        _clearCalculRows();
+      } else {
+        for (int i = _lines.length - 1; i >= 0; i--) {
+          if (!_lines[i].isEmpty) {
+            int? removedValue = _lines[i].removeLastInput();
+            if (removedValue != null) {
+              int index = _draw.indexWhere((tile) => tile.value == removedValue && tile.isAlreadyPicked);
+              if (index != -1) {
+                _draw[index].isAlreadyPicked = false;
+              } else {
+                int usedResultIndex = _lines.lastIndexWhere((line) => line.result == removedValue);
+                _lines[usedResultIndex].isResultUsed = false;
+              }
             }
+            break;
           }
-          break;
         }
       }
     });
   }
 
-  /// Retrieves the result of the last complete CalculationLine.
+  /// Retrieves the result tiles at the end of the CalculationLine.
   List<NumberTile?> _getResultTiles() {
     List<NumberTile?> results = [];
     for (var line in _lines) {
@@ -169,18 +204,48 @@ class HomePageState extends State<HomePage> {
       _getInputsFromResult(expr.left!);
     }
 
-    final List<NumberTile?> availableTiles = [..._draw, ..._getResultTiles()];
+    int currentLineIndex = _lines.lastIndexWhere((line) => !line.isEmpty) + 1;
 
-    final leftTile = availableTiles.firstWhere((tile) => (tile?.value == expr.left?.value && tile?.isAlreadyPicked == false));
-    final rightTile = availableTiles.firstWhere((tile) => (tile?.value == expr.right?.value && tile?.isAlreadyPicked == false));
+    int leftIndex = _draw.indexWhere((tile) => (tile.value == expr.left?.value && tile.isAlreadyPicked == false));
+    if (leftIndex != -1) {
+      onNumberPressed(_draw[leftIndex]);
+    } else {
+      // If it's not in the drawn tiles, it's in the results
+      leftIndex = _lines.lastIndexWhere((line) => line.result == expr.left?.value);
+      setState(() {
+        _lines[leftIndex].isResultUsed = _lines[currentLineIndex].addInput(expr.left?.value ?? 0);
+      });
+    }
 
-    onNumberPressed(leftTile);
     onOperatorPressed(expr.operator!);
-    onNumberPressed(rightTile);
+
+    int rightIndex = _draw.indexWhere((tile) => (tile.value == expr.right?.value && tile.isAlreadyPicked == false));
+    if (rightIndex != -1) {
+      onNumberPressed(_draw[rightIndex]);
+    } else {
+      // If it's not in the drawn tiles, it's in the results
+      rightIndex = _lines.lastIndexWhere((line) => line.result == expr.right?.value);
+      setState(() {
+        _lines[rightIndex].isResultUsed = _lines[currentLineIndex].addInput(expr.right?.value ?? 0);
+      });
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    int totalPages = _numberOfBestSolutions;
+    int windowSize = 15;
+    int startPage = totalPages;
+    if (totalPages > windowSize) {
+      // Center the active index in the window as much as possible.
+      startPage = activeCarouselIndex - windowSize ~/ 2;
+      // Make sure the startPage is within bounds.
+      if (startPage < 0) startPage = 0;
+      if (startPage + windowSize > totalPages) startPage = totalPages - windowSize;
+    }
+    int displayedActiveIndex = activeCarouselIndex - startPage;
+    int dotCount = totalPages < windowSize ? totalPages : windowSize;
+
     return Scaffold(
       body: SafeArea(
         child: Padding(
@@ -208,31 +273,18 @@ class HomePageState extends State<HomePage> {
                         CarouselSlider.builder(
                           itemCount: _numberOfBestSolutions,
                           itemBuilder: (context, index, realIndex) {
-                            return ResultBoard(
-                                lines: _lines,
-                                onResultClicked: (clickedLine) {
-                                  setState(() {
-                                    clickedLine.isResultUsed = true;
-                                  });
-                                  onNumberPressed(NumberTile(
-                                    clickedLine.result!,
-                                    Expression.leaf(clickedLine.result!),
-                                    true,
-                                  ));
-                                });
+                            return BestSolutionBoard(
+                              expr: bestSolutions[index].expr,
+                              onResultClicked: (clickedLine) {},
+                            );
                           },
                           options: CarouselOptions(
+                            initialPage: activeCarouselIndex,
                             height: 320,
                             viewportFraction: 1,
                             onPageChanged: (index, reason) {
                               setState(() {
                                 activeCarouselIndex = index;
-                                WidgetsBinding.instance.addPostFrameCallback((_) {
-                                  for (var tile in _draw) {
-                                    tile.isAlreadyPicked = false;
-                                  }
-                                  _getInputsFromResult(bestSolutions[index].expr);
-                                });
                               });
                             },
                           ),
@@ -248,8 +300,8 @@ class HomePageState extends State<HomePage> {
                                 style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                               ),
                             AnimatedSmoothIndicator(
-                              activeIndex: activeCarouselIndex,
-                              count: _numberOfBestSolutions,
+                              activeIndex: displayedActiveIndex,
+                              count: dotCount,
                               effect: ExpandingDotsEffect(
                                 dotWidth: 8,
                                 dotHeight: 8,
@@ -314,7 +366,11 @@ class HomePageState extends State<HomePage> {
                     onPressed: _generateDraw,
                   ),
                   IconButton(
-                    icon: const Icon(Icons.lightbulb, size: 40),
+                    icon: Icon(
+                      Icons.lightbulb,
+                      size: 40,
+                      color: _cachedSolutions.isEmpty ? Theme.of(context).iconTheme.color!.withValues(alpha: 0.3) : null,
+                    ),
                     onPressed: _calculateSolution,
                   ),
                   IconButton(
@@ -337,6 +393,10 @@ class LeCompteEstBonApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    WakelockPlus.enable();
+
+    SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'Le Compte Est Bon',
@@ -351,46 +411,68 @@ List<NumberTile> exploreAndSortSolutionsIsolate(Map<String, dynamic> args) {
   int target = args['target'];
   Map<String, List<NumberTile>> memo = {};
 
-  String memoKey(List<NumberTile> tiles) {
-    List<int> sortedValues = tiles.map((t) => t.value).toList()..sort();
-    return sortedValues.join(",");
+  // A canonical memo key which is order independent.
+  String memoKey(List<NumberTile> currentTiles) {
+    // Use a canonical representation of the tile: value and a normalized expression string.
+    List<String> keyParts = currentTiles.map((t) => "${t.value}:${t.expr.toString()}").toList();
+    keyParts.sort(); // sort to ensure order independence
+    return keyParts.join(",");
   }
 
-  List<NumberTile> exploreSolutions(List<NumberTile> tiles, int target) {
-    if (tiles.length == 1) return tiles;
-    String key = memoKey(tiles);
+  List<NumberTile> exploreSolutions(List<NumberTile> currentTiles, int target) {
+    if (currentTiles.length == 1) return currentTiles;
+    String key = memoKey(currentTiles);
     if (memo.containsKey(key)) return memo[key]!;
 
     List<NumberTile> solutions = [];
 
-    for (int i = 0; i < tiles.length; i++) {
-      for (int j = i + 1; j < tiles.length; j++) {
-        NumberTile a = tiles[i];
-        NumberTile b = tiles[j];
-        List<MapEntry<Operator, bool Function()>> operations = [
-          MapEntry(Operator.add, () => true),
-          MapEntry(Operator.multiply, () => true),
-          MapEntry(Operator.subtract, () => a.value >= b.value),
-          MapEntry(Operator.divide, () => b.value != 0 && a.value % b.value == 0),
-        ];
+    for (int i = 0; i < currentTiles.length; i++) {
+      for (int j = i + 1; j < currentTiles.length; j++) {
+        NumberTile a = currentTiles[i];
+        NumberTile b = currentTiles[j];
+
+        // List to hold pairs along with the operation to apply.
+        List<MapEntry<Operator, TilePair>> operations = [];
+
+        // Commutative: addition & multiplication.
+        operations.add(MapEntry(Operator.add, TilePair(a, b)));
+        operations.add(MapEntry(Operator.multiply, TilePair(a, b)));
+
+        // Non-commutative: subtraction.
+        if (a.value > b.value) {
+          operations.add(MapEntry(Operator.subtract, TilePair(a, b)));
+        } else if (b.value > a.value) {
+          operations.add(MapEntry(Operator.subtract, TilePair(b, a)));
+        }
+        // Non-commutative: division.
+        if (b.value != 0 && a.value % b.value == 0) {
+          operations.add(MapEntry(Operator.divide, TilePair(a, b)));
+        } else if (a.value != 0 && b.value % a.value == 0) {
+          operations.add(MapEntry(Operator.divide, TilePair(b, a)));
+        }
+
+        // Process all valid operations.
         for (var opEntry in operations) {
-          if (!opEntry.value()) continue;
+          Operator op = opEntry.key;
+          TilePair tilePair = opEntry.value;
+          NumberTile resultTile = combineTiles(tilePair.first, tilePair.second, op);
 
-          NumberTile resultTile = combineTiles(a, b, opEntry.key);
-          List<NumberTile> newNumbers = List.from(tiles)
-            ..remove(a)
-            ..remove(b)
-            ..add(resultTile);
+          // Create new state of tiles: remove the two used tiles and add the result.
+          List<NumberTile> newTiles = List.from(currentTiles);
+          // Remove in descending order to avoid index issues.
+          newTiles.removeAt(j);
+          newTiles.removeAt(i);
+          newTiles.add(resultTile);
 
+          // If we hit the target, add the result; else, keep exploring.
           if (resultTile.value == target) {
             solutions.add(resultTile);
           } else {
-            solutions.addAll(exploreSolutions(newNumbers, target));
+            solutions.addAll(exploreSolutions(newTiles, target));
           }
         }
       }
     }
-
     memo[key] = solutions;
     return solutions;
   }

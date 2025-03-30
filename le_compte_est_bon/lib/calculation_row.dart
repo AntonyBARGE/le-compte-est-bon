@@ -37,8 +37,8 @@ class CalculationRow extends StatelessWidget {
         ),
         DrawTile(
           label: line.result?.toString() ?? '',
-          isAlreadyPicked: line.isResultUsed,
-          onPressed: () => onResultClicked(line),
+          isAlreadyPicked: (line.isResultUsed && (line.result != 0 && line.result != null)),
+          onPressed: () => (line.result != 0 && line.result != null) ? onResultClicked(line) : null,
           variant: TileVariant.numberButton,
         ),
       ],

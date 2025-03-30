@@ -176,3 +176,10 @@ NumberTile combineTiles(NumberTile a, NumberTile b, Operator op) {
   int newValue = newExpr.value!;
   return NumberTile(newValue, newExpr);
 }
+
+// Helper class to hold a pair of tiles.
+class TilePair {
+  final NumberTile first;
+  final NumberTile second;
+  TilePair(this.first, this.second);
+}

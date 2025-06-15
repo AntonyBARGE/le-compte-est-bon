@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:le_compte_est_bon/best_result_board.dart';
 import 'package:le_compte_est_bon/calculation_line.dart';
 import 'package:le_compte_est_bon/draw_tile.dart';
+import 'package:le_compte_est_bon/loading_barrier.dart';
 import 'package:le_compte_est_bon/number_tile.dart';
 import 'package:le_compte_est_bon/result_board.dart';
 import 'package:smooth_page_indicator/smooth_page_indicator.dart';
@@ -30,6 +31,8 @@ class HomePageState extends State<HomePage> {
   List<NumberTile> bestSolutions = [];
   int activeCarouselIndex = 0;
   final List<NumberTile> _cachedSolutions = [];
+  bool isLoading = false;
+  int _activeTaskId = 0;
 
   @override
   void initState() {
@@ -38,6 +41,7 @@ class HomePageState extends State<HomePage> {
   }
 
   void _generateDraw() {
+    _activeTaskId++;
     _numberOfBestSolutions = 0;
     _clearCalculRows();
     setState(() {
@@ -69,7 +73,11 @@ class HomePageState extends State<HomePage> {
   }
 
   Future<void> _calculateSolution({bool isHidden = false}) async {
+    final int taskIdAtStart = _activeTaskId;
+
     void processSolutions(List<NumberTile> solutions) {
+      if (taskIdAtStart != _activeTaskId) return; // Aborted due to new draw
+
       // Deduplicate best solutions based on the expression equality.
       Set<Expression> uniqueExpressions = {};
       int bestValue = solutions.first.value;
@@ -90,26 +98,24 @@ class HomePageState extends State<HomePage> {
     }
 
     if (!isHidden) {
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (context) => Center(
-          child: CircularProgressIndicator(color: Colors.deepPurple),
-        ),
-      );
+      setState(() {
+        isLoading = true;
+      });
     }
 
     if (_cachedSolutions.isEmpty) {
       _solutions = await _exploreAndSortSolutions();
+      if (taskIdAtStart != _activeTaskId) return; // Aborted, don't update state
       setState(() {
         _cachedSolutions.addAll(_solutions);
       });
     }
 
-    if (!isHidden) {
+    if (!isHidden && taskIdAtStart == _activeTaskId) {
       processSolutions(_cachedSolutions);
-      // ignore: use_build_context_synchronously
-      Navigator.of(context).pop();
+      setState(() {
+        isLoading = false;
+      });
     }
   }
 
@@ -246,141 +252,151 @@ class HomePageState extends State<HomePage> {
     int displayedActiveIndex = activeCarouselIndex - startPage;
     int dotCount = totalPages < windowSize ? totalPages : windowSize;
 
-    return Scaffold(
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8.0).add(EdgeInsets.only(top: 6)),
-          child: Column(
-            mainAxisSize: MainAxisSize.max,
-            children: [
-              const SizedBox(height: 20),
-              _numberOfBestSolutions == 0
-                  ? ResultBoard(
-                      lines: _lines,
-                      onResultClicked: (clickedLine) {
-                        setState(() {
-                          clickedLine.isResultUsed = true;
-                        });
-                        onNumberPressed(NumberTile(
-                          clickedLine.result!,
-                          Expression.leaf(clickedLine.result!),
-                          true,
-                        ));
-                      })
-                  : Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        CarouselSlider.builder(
-                          itemCount: _numberOfBestSolutions,
-                          itemBuilder: (context, index, realIndex) {
-                            return BestSolutionBoard(
-                              expr: bestSolutions[index].expr,
-                              onResultClicked: (clickedLine) {},
-                            );
-                          },
-                          options: CarouselOptions(
-                            initialPage: activeCarouselIndex,
-                            height: 320,
-                            viewportFraction: 1,
-                            onPageChanged: (index, reason) {
-                              setState(() {
-                                activeCarouselIndex = index;
-                              });
+    return LoadingBarrier(
+      isBusy: isLoading,
+      onClose: () => setState(() {
+        isLoading = false;
+      }),
+      duration: Duration(milliseconds: 300),
+      busyBuilder: (context) => Center(
+        child: CircularProgressIndicator(color: Colors.deepPurple),
+      ),
+      child: Scaffold(
+        body: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8.0).add(EdgeInsets.only(top: 6)),
+            child: Column(
+              mainAxisSize: MainAxisSize.max,
+              children: [
+                const SizedBox(height: 20),
+                _numberOfBestSolutions == 0
+                    ? ResultBoard(
+                        lines: _lines,
+                        onResultClicked: (clickedLine) {
+                          setState(() {
+                            clickedLine.isResultUsed = true;
+                          });
+                          onNumberPressed(NumberTile(
+                            clickedLine.result!,
+                            Expression.leaf(clickedLine.result!),
+                            true,
+                          ));
+                        })
+                    : Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          CarouselSlider.builder(
+                            itemCount: _numberOfBestSolutions,
+                            itemBuilder: (context, index, realIndex) {
+                              return BestSolutionBoard(
+                                expr: bestSolutions[index].expr,
+                                onResultClicked: (clickedLine) {},
+                              );
                             },
-                          ),
-                        ),
-                        SizedBox(height: 16),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            if (_numberOfBestSolutions > 1)
-                              Text(
-                                '<   ',
-                                textAlign: TextAlign.center,
-                                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                              ),
-                            AnimatedSmoothIndicator(
-                              activeIndex: displayedActiveIndex,
-                              count: dotCount,
-                              effect: ExpandingDotsEffect(
-                                dotWidth: 8,
-                                dotHeight: 8,
-                                activeDotColor: const Color.fromARGB(255, 247, 241, 78),
-                              ),
+                            options: CarouselOptions(
+                              initialPage: activeCarouselIndex,
+                              height: 320,
+                              viewportFraction: 1,
+                              onPageChanged: (index, reason) {
+                                setState(() {
+                                  activeCarouselIndex = index;
+                                });
+                              },
                             ),
-                            if (_numberOfBestSolutions > 1) ...{
-                              Text(
-                                ' / $_numberOfBestSolutions',
-                                textAlign: TextAlign.center,
-                                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
+                          ),
+                          SizedBox(height: 16),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              if (_numberOfBestSolutions > 1)
+                                Text(
+                                  '<   ',
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                                ),
+                              AnimatedSmoothIndicator(
+                                activeIndex: displayedActiveIndex,
+                                count: dotCount,
+                                effect: ExpandingDotsEffect(
+                                  dotWidth: 8,
+                                  dotHeight: 8,
+                                  activeDotColor: const Color.fromARGB(255, 247, 241, 78),
+                                ),
                               ),
-                              Text(
-                                ' >',
-                                textAlign: TextAlign.center,
-                                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                              ),
-                            }
-                          ],
+                              if (_numberOfBestSolutions > 1) ...{
+                                Text(
+                                  ' / $_numberOfBestSolutions',
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
+                                ),
+                                Text(
+                                  ' >',
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                                ),
+                              }
+                            ],
+                          ),
+                        ],
+                      ),
+                Spacer(),
+                const SizedBox(height: 16),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12.0),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: Operator.values
+                        .map((value) => DrawTile(
+                              label: opToString(value)!,
+                              onPressed: () => onOperatorPressed(value),
+                              variant: TileVariant.operatorButton,
+                            ))
+                        .toList(),
+                  ),
+                ),
+                Text(
+                  '$_targetNumber',
+                  style: const TextStyle(fontSize: 64, fontWeight: FontWeight.bold),
+                ),
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  children: _draw
+                      .map(
+                        (tile) => DrawTile(
+                          label: '${tile.value}',
+                          onPressed: () => onNumberPressed(tile),
+                          isAlreadyPicked: tile.isAlreadyPicked,
+                          variant: TileVariant.numberButton,
                         ),
-                      ],
-                    ),
-              Spacer(),
-              const SizedBox(height: 16),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12.0),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: Operator.values
-                      .map((value) => DrawTile(
-                            label: opToString(value)!,
-                            onPressed: () => onOperatorPressed(value),
-                            variant: TileVariant.operatorButton,
-                          ))
+                      )
                       .toList(),
                 ),
-              ),
-              Text(
-                '$_targetNumber',
-                style: const TextStyle(fontSize: 64, fontWeight: FontWeight.bold),
-              ),
-              Wrap(
-                spacing: 10,
-                runSpacing: 10,
-                children: _draw
-                    .map(
-                      (tile) => DrawTile(
-                        label: '${tile.value}',
-                        onPressed: () => onNumberPressed(tile),
-                        isAlreadyPicked: tile.isAlreadyPicked,
-                        variant: TileVariant.numberButton,
-                      ),
-                    )
-                    .toList(),
-              ),
-              const SizedBox(height: 20),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceAround,
-                children: [
-                  IconButton(
-                    icon: const Icon(Icons.refresh, size: 40),
-                    onPressed: _generateDraw,
-                  ),
-                  IconButton(
-                    icon: Icon(
-                      Icons.lightbulb,
-                      size: 40,
-                      color: _cachedSolutions.isEmpty ? Theme.of(context).iconTheme.color!.withValues(alpha: 0.3) : null,
+                const SizedBox(height: 20),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceAround,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.refresh, size: 40),
+                      onPressed: _generateDraw,
                     ),
-                    onPressed: _calculateSolution,
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.undo, size: 40),
-                    onPressed: onCancelPressed,
-                  ),
-                ],
-              ),
-              const SizedBox(height: 20),
-            ],
+                    IconButton(
+                      icon: Icon(
+                        Icons.lightbulb,
+                        size: 40,
+                        color: _cachedSolutions.isEmpty ? Theme.of(context).iconTheme.color!.withValues(alpha: 0.3) : null,
+                      ),
+                      onPressed: _calculateSolution,
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.undo, size: 40),
+                      onPressed: onCancelPressed,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 20),
+              ],
+            ),
           ),
         ),
       ),
